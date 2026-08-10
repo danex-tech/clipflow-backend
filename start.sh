@@ -21,8 +21,12 @@ if warp-cli --accept-tos registration new 2>&1; then
   STATUS=$(warp-cli --accept-tos status 2>&1)
   echo "WARP status: $STATUS"
   if echo "$STATUS" | grep -qi "connected"; then
-    echo "WARP connected successfully — using proxy at 127.0.0.1:40000"
-    export PROXY_URL="socks5://127.0.0.1:40000"
+    echo "WARP connected successfully."
+    # TEMPORARILY DISABLED: exporting PROXY_URL here causes yt-dlp to
+    # forward this address to the separate PO Token provider service too,
+    # which breaks (it has no WARP of its own, so 127.0.0.1:40000 doesn't
+    # exist there). Testing whether PO Tokens alone are enough without WARP.
+    # export PROXY_URL="socks5://127.0.0.1:40000"
   else
     echo "WARP did not reach Connected state — continuing without proxy."
   fi
