@@ -7,18 +7,18 @@ fi
 
 echo "Attempting to start Cloudflare WARP..."
 
-# Start WARP daemon
-warp-svc &
+# Start WARP daemon quietly.
+warp-svc >/tmp/warp.log 2>&1 &
 sleep 5
 
 # Register WARP if this container does not already have a registration.
-warp-cli --accept-tos registration new 2>&1 || true
+warp-cli --accept-tos registration new >/tmp/warp-cli.log 2>&1 || true
 
 # Use WARP local proxy mode.
-warp-cli --accept-tos mode proxy 2>&1
+warp-cli --accept-tos mode proxy >/tmp/warp-cli.log 2>&1
 
 # Connect WARP.
-warp-cli --accept-tos connect 2>&1
+warp-cli --accept-tos connect >/tmp/warp-cli.log 2>&1
 sleep 5
 
 echo "Checking WARP status..."
