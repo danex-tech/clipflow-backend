@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 
 const { Worker, UnrecoverableError } = require('bullmq');
@@ -309,11 +310,13 @@ const worker = new Worker(
           height,
           hasAudio,
           outputPath: rawPath,
+
           onProgress: (percent) => {
             reportDownload(
               percent
             );
           },
+
           onProgressDetails: (
             details
           ) => {
@@ -389,11 +392,13 @@ const worker = new Worker(
           url,
           formatId,
           outputPath: rawPath,
+
           onProgress: (percent) => {
             reportDownload(
               percent
             );
           },
+
           onProgressDetails: (
             details
           ) => {
@@ -476,11 +481,13 @@ const worker = new Worker(
           formatId,
           outputPath:
             videoOnlyPath,
+
           onProgress: (percent) => {
             reportVideoDl(
               percent
             );
           },
+
           onProgressDetails: (
             details
           ) => {
@@ -531,11 +538,13 @@ const worker = new Worker(
           url,
           outputPath:
             audioOnlyPath,
+
           onProgress: (percent) => {
             reportAudioDl(
               percent
             );
           },
+
           onProgressDetails: (
             details
           ) => {
@@ -638,12 +647,17 @@ const worker = new Worker(
         );
       }
 
+      // Diagnostic check: confirm that the final file
+      // actually exists immediately after processing.
+      console.log(
+        `[Worker] Final file check | path=${finalPath} | exists=${fs.existsSync(finalPath)}`
+      );
+
       await job.updateProgress({
         stage: 'done',
         percent: 100,
         attempt,
-        maxAttempts:
-          MAX_ATTEMPTS,
+        maxAttempts: MAX_ATTEMPTS,
         ...(Number.isFinite(
           expectedSize
         ) &&
