@@ -1,235 +1,1048 @@
-const { spawn } = require('child_process');
+const { spawn } = require("child_process");
+const fs = require("fs");
 
-// Path to the yt-dlp executable.
-// On Windows, if yt-dlp isn't recognized in your terminal globally,
-// set YTDLP_PATH in your .env file to the full path, e.g.:
-// YTDLP_PATH=C:\Users\Daniel\AppData\Local\Python\pythoncore-3.14-64\Scripts\yt-dlp.exe
-const YTDLP_PATH = process.env.YTDLP_PATH || 'yt-dlp';
+const YTDLP_PATH = process.env.YTDLP_PATH || "yt-dlp";
 
-// Optional: name of a browser to borrow cookies from (e.g. "chrome", "edge", "firefox").
-// Less reliable on Windows since Chromium browsers often lock their cookie file.
-const COOKIES_BROWSER = process.env.YTDLP_COOKIES_BROWSER;
+const COOKIES_BROWSER = process.env.COOKIES_BROWSER;
+const COOKIES_FILE = process.env.COOKIES_FILE;
+const PROXY_URL = process.env.PROXY_URL;
 
-// Optional: path to an exported cookies.txt file (more reliable than COOKIES_BROWSER).
-// If set, this takes priority.
-const COOKIES_FILE = process.env.YTDLP_COOKIES_FILE;
+// NOTE:
+// We intentionally do NOT pass POT_PROVIDER_URL to yt-dlp while using
+// web_embedded. web_embedded does not require a PO token, and the PO-token
+// provider can cause yt-dlp/YouTube to fall back to an android_vr download
+// path that returns HTTP 403.
 
-function addCookieArgs(args) {
-  if (COOKIES_FILE) {
-    args.push('--cookies', COOKIES_FILE);
-  } else if (COOKIES_BROWSER) {
-    args.push('--cookies-from-browser', COOKIES_BROWSER);
-  }
-  return args;
-}
-
-// Optional: route yt-dlp's traffic through a proxy (Cloudflare WARP's local
-// SOCKS5 proxy at socks5://127.0.0.1:40000), set by start.sh if WARP
-// connects successfully on Render. Locally this stays unset.
-function addProxyArgs(args) {
-  if (process.env.PROXY_URL) {
-    args.push('--proxy', process.env.PROXY_URL);
-  }
-  return args;
-}
-
-// Newer yt-dlp versions require explicit permission to download/use their
-// updated JS-challenge-solving component — without this, it silently skips
-// solving YouTube's challenges and most formats become unavailable, even
-// with Deno already installed.
-function addRemoteComponentArgs(args) {
-  args.push('--remote-components', 'ejs:github');
-  return args;
-}
-
-// Some platforms (TikTok especially) reject requests unless they look like
-// they're coming from a real browser at the network level, not just a
-// normal User-Agent header. --impersonate does this properly using
-// curl_cffi. Harmless for platforms that don't need it.
-function addImpersonateArgs(args) {
-  args.push('--impersonate', 'chrome');
-  return args;
-}
-
-// Optional: points yt-dlp at a PO Token provider server, needed to unlock
-// YouTube's higher-quality formats. Runs as its own separate service (see
-// POT_PROVIDER_URL in .env) rather than locally, to keep this container's
-// memory usage low. If unset, YouTube quality caps around 360p — everything
-// else is unaffected either way.
-function addPotProviderArgs(args) {
-  if (process.env.POT_PROVIDER_URL) {
-    args.push('--extractor-args', `youtubepot-bgutilhttp:base_url=${process.env.POT_PROVIDER_URL}`);
-  }
-  return args;
-}
+let ytDlpCommandLogged = false;
 
 function addCommonArgs(args) {
-  args = addCookieArgs(args);
-  args = addProxyArgs(args);
-  args = addRemoteComponentArgs(args);
-  args = addImpersonateArgs(args);
-  args = addPotProviderArgs(args);
-  return args;
+  const common = [
+    "--ignore-config",
+    "--remote-components",
+    "ejs:github",
+
+    // Force the client we already confirmed works manually.
+    "--extractor-args",
+    "youtube:player_client=web_embedded",
+  ];
+
+  if (COOKIES_BROWSER) {
+    common.push(
+      "--cookies-from-browser",
+      COOKIES_BROWSER
+    );
+  }
+
+  if (COOKIES_FILE) {
+    common.push(
+      "--cookies",
+      COOKIES_FILE
+    );
+  }
+
+  if (PROXY_URL) {
+    common.push(
+      "--proxy",
+      PROXY_URL
+    );
+  }
+
+  return [...common, ...args];
 }
 
-/**
- * Runs yt-dlp with the given arguments and returns stdout as a string.
- * Rejects with a readable error message if yt-dlp fails.
- */
-function runYtDlp(args) {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(YTDLP_PATH, addCookieArgs(args));
+function logYtDlpCommand(finalArgs) {
+  if (ytDlpCommandLogged) {
+    return;
+  }
 
-    let stdout = '';
-    let stderr = '';
+  ytDlpCommandLogged = true;
 
-    proc.stdout.on('data', (chunk) => {
-      stdout += chunk.toString();
-    });
+  console.log("[yt-dlp] Executable:", YTDLP_PATH);
 
-    proc.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
-    });
+  console.log(
+    "[yt-dlp] Arguments:",
+    finalArgs
+      .map((arg) => {
+        const value = String(arg);
 
-    proc.on('error', (err) => {
-      reject(new Error(`Failed to start yt-dlp: ${err.message}`));
-    });
-
-    proc.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(stderr || `yt-dlp exited with code ${code}`));
-      } else {
-        if (stderr.trim()) {
-          console.log('yt-dlp warnings:', stderr.trim());
+        if (
+          /\s/.test(value) ||
+          value.includes("&") ||
+          value.includes("?")
+        ) {
+          return `"${value.replace(/"/g, '\\"')}"`;
         }
-        resolve(stdout);
+
+        return value;
+      })
+      .join(" ")
+  );
+}
+
+function runYtDlp(...args) {
+  return new Promise((resolve, reject) => {
+    const finalArgs = addCommonArgs(args);
+
+    logYtDlpCommand(finalArgs);
+
+    const child = spawn(
+      YTDLP_PATH,
+      finalArgs,
+      {
+        windowsHide: true,
       }
+    );
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (data) => {
+      const text = data.toString();
+
+      stdout += text;
+
+      process.stdout.write(text);
+    });
+
+    child.stderr.on("data", (data) => {
+      const text = data.toString();
+
+      stderr += text;
+
+      process.stderr.write(text);
+    });
+
+    child.on("error", (error) => {
+      reject(error);
+    });
+
+    child.on("close", (code, signal) => {
+      if (code === 0) {
+        resolve({
+          stdout,
+          stderr,
+        });
+
+        return;
+      }
+
+      const error = new Error(
+        stderr.trim() ||
+          stdout.trim() ||
+          `yt-dlp exited with code ${code}`
+      );
+
+      error.code = code;
+      error.signal = signal;
+
+      reject(error);
     });
   });
 }
 
-/**
- * Fetches metadata + available formats for a given video URL.
- * Each format now also reports hasAudio, so the download step knows
- * whether it's a single combined stream or needs a separate audio track.
- */
-async function getVideoInfo(url) {
-  const output = await runYtDlp(addPotProviderArgs(addImpersonateArgs(addRemoteComponentArgs(addProxyArgs(['--dump-json', '--no-playlist', url])))));
-  const data = JSON.parse(output);
+function getStreamSize(format, duration) {
+  if (
+    Number.isFinite(format.filesize) &&
+    format.filesize > 0
+  ) {
+    return {
+      size: format.filesize,
+      estimated: false,
+    };
+  }
 
-  const formats = (data.formats || [])
-    .filter((f) => f.vcodec !== 'none')
-    .map((f) => ({
-      format_id: f.format_id,
-      quality: f.format_note || (f.height ? `${f.height}p` : 'unknown'),
-      ext: f.ext,
-      height: f.height || 0,
-      filesize: f.filesize || f.filesize_approx || null,
-      hasAudio: f.acodec !== 'none' && f.acodec !== undefined && f.acodec !== null,
-    }))
-    .filter((f, index, arr) => arr.findIndex((x) => x.quality === f.quality) === index)
-    .sort((a, b) => b.height - a.height);
+  if (
+    Number.isFinite(format.filesize_approx) &&
+    format.filesize_approx > 0
+  ) {
+    return {
+      size: format.filesize_approx,
+      estimated: true,
+    };
+  }
+
+  if (duration > 0) {
+    let bitrate = 0;
+
+    if (Number.isFinite(format.tbr)) {
+      bitrate = format.tbr;
+    } else {
+      const videoBitrate = Number.isFinite(format.vbr)
+        ? format.vbr
+        : 0;
+
+      const audioBitrate = Number.isFinite(format.abr)
+        ? format.abr
+        : 0;
+
+      bitrate = videoBitrate + audioBitrate;
+    }
+
+    if (bitrate > 0) {
+      return {
+        size: (bitrate * 1000 * duration) / 8,
+        estimated: true,
+      };
+    }
+  }
 
   return {
-    title: data.title,
-    thumbnail: data.thumbnail,
-    duration: data.duration,
-    isLive: data.is_live || false,
-    uploader: data.uploader,
+    size: null,
+    estimated: true,
+  };
+}
+
+function findBestAudioFormat(formats) {
+  const audioFormats = formats.filter(
+    (format) =>
+      format.vcodec === "none" &&
+      format.acodec &&
+      format.acodec !== "none"
+  );
+
+  if (!audioFormats.length) {
+    return null;
+  }
+
+  const m4aFormats = audioFormats.filter(
+    (format) => format.ext === "m4a"
+  );
+
+  const candidates = m4aFormats.length
+    ? m4aFormats
+    : audioFormats;
+
+  return [...candidates].sort((a, b) => {
+    const aAbr = Number.isFinite(a.abr)
+      ? a.abr
+      : Number.isFinite(a.tbr)
+      ? a.tbr
+      : 0;
+
+    const bAbr = Number.isFinite(b.abr)
+      ? b.abr
+      : Number.isFinite(b.tbr)
+      ? b.tbr
+      : 0;
+
+    if (bAbr !== aAbr) {
+      return bAbr - aAbr;
+    }
+
+    const aSize =
+      a.filesize ||
+      a.filesize_approx ||
+      0;
+
+    const bSize =
+      b.filesize ||
+      b.filesize_approx ||
+      0;
+
+    return bSize - aSize;
+  })[0];
+}
+
+function calculateDownloadSize(
+  format,
+  allFormats,
+  duration
+) {
+  const videoInfo = getStreamSize(
+    format,
+    duration
+  );
+
+  let totalSize = videoInfo.size;
+  let estimated = videoInfo.estimated;
+
+  const hasAudio =
+    format.acodec &&
+    format.acodec !== "none";
+
+  if (hasAudio) {
+    return {
+      size: totalSize,
+      estimated,
+    };
+  }
+
+  const bestAudio =
+    findBestAudioFormat(allFormats);
+
+  if (
+    !bestAudio ||
+    totalSize === null
+  ) {
+    return {
+      size: null,
+      estimated: true,
+    };
+  }
+
+  const audioInfo = getStreamSize(
+    bestAudio,
+    duration
+  );
+
+  if (audioInfo.size === null) {
+    return {
+      size: null,
+      estimated: true,
+    };
+  }
+
+  totalSize += audioInfo.size;
+  estimated =
+    estimated ||
+    audioInfo.estimated;
+
+  return {
+    size: totalSize,
+    estimated,
+  };
+}
+
+async function getVideoInfo(url) {
+  const { stdout } = await runYtDlp(
+    "--dump-json",
+    "--no-playlist",
+    url
+  );
+
+  const data = JSON.parse(stdout);
+
+  const duration =
+    Number(data.duration) || 0;
+
+  const rawFormats =
+    Array.isArray(data.formats)
+      ? data.formats
+      : [];
+
+  const videoFormats =
+    rawFormats.filter(
+      (format) =>
+        format.vcodec &&
+        format.vcodec !== "none"
+    );
+
+  const mappedFormats =
+    videoFormats.map((format) => {
+      const hasAudio =
+        format.acodec &&
+        format.acodec !== "none";
+
+      const sizeInfo =
+        calculateDownloadSize(
+          format,
+          rawFormats,
+          duration
+        );
+
+      return {
+        format_id:
+          format.format_id,
+
+        quality:
+          format.format_note ||
+          (
+            format.height
+              ? `${format.height}p`
+              : "unknown"
+          ),
+
+        ext:
+          format.ext,
+
+        height:
+          format.height ||
+          null,
+
+        filesize:
+          sizeInfo.size,
+
+        filesizeIsEstimate:
+          sizeInfo.estimated,
+
+        hasAudio,
+
+        audioCodec:
+          format.acodec ||
+          null,
+
+        videoCodec:
+          format.vcodec ||
+          null,
+
+        videoBitrate:
+          Number.isFinite(format.vbr)
+            ? format.vbr
+            : null,
+
+        audioBitrate:
+          Number.isFinite(format.abr)
+            ? format.abr
+            : null,
+
+        totalBitrate:
+          Number.isFinite(format.tbr)
+            ? format.tbr
+            : null,
+      };
+    });
+
+  const grouped = new Map();
+
+  for (const format of mappedFormats) {
+    const key =
+      format.height ||
+      format.quality;
+
+    if (!grouped.has(key)) {
+      grouped.set(key, []);
+    }
+
+    grouped
+      .get(key)
+      .push(format);
+  }
+
+  const formats =
+    [...grouped.values()]
+      .map((group) =>
+        [...group].sort(
+          (a, b) => {
+            const audioScore =
+              Number(b.hasAudio) -
+              Number(a.hasAudio);
+
+            if (audioScore !== 0) {
+              return audioScore;
+            }
+
+            const mp4Score =
+              Number(b.ext === "mp4") -
+              Number(a.ext === "mp4");
+
+            if (mp4Score !== 0) {
+              return mp4Score;
+            }
+
+            return (
+              (b.videoBitrate || 0) -
+              (a.videoBitrate || 0)
+            );
+          }
+        )[0]
+      )
+      .sort(
+        (a, b) =>
+          (b.height || 0) -
+          (a.height || 0)
+      );
+
+  return {
+    title:
+      data.title ||
+      "Untitled video",
+
+    thumbnail:
+      data.thumbnail ||
+      null,
+
+    duration,
+
+    isLive:
+      Boolean(data.is_live) ||
+      Boolean(
+        data.live_status ===
+          "is_live"
+      ),
+
+    uploader:
+      data.uploader ||
+      data.channel ||
+      null,
+
     formats,
   };
 }
 
-/**
- * Runs a yt-dlp download with a given format selector, reporting live
- * progress and exposing the running process via processRef so the caller
- * can kill it (used for cancellation). Shared by every download variant
- * below so there's only one place that actually spawns yt-dlp for downloads.
- */
-function runYtDlpDownload({ url, formatSelector, outputPath, merge, onProgress, processRef }) {
-  return new Promise((resolve, reject) => {
-    let args = ['--no-playlist', '-f', formatSelector, '--newline', '-o', outputPath, url];
+function parseSizeToBytes(value) {
+  if (!value) {
+    return null;
+  }
 
-    if (merge) {
-      args.push('--merge-output-format', 'mp4');
-    }
+  const match = String(value)
+    .trim()
+    .match(
+      /^([\d.]+)\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB|B)$/i
+    );
 
-    if (process.env.FFMPEG_PATH) {
-      args.push('--ffmpeg-location', process.env.FFMPEG_PATH);
-    }
+  if (!match) {
+    return null;
+  }
 
-    args = addCommonArgs(args);
+  const amount = Number(match[1]);
+  const unit =
+    match[2].toLowerCase();
 
-    const proc = spawn(YTDLP_PATH, args);
-    if (processRef) processRef.current = proc;
+  const multipliers = {
+    b: 1,
+    kib: 1024,
+    mib: 1024 ** 2,
+    gib: 1024 ** 3,
+    tib: 1024 ** 4,
+    kb: 1000,
+    mb: 1000 ** 2,
+    gb: 1000 ** 3,
+    tb: 1000 ** 4,
+  };
 
-    let stderr = '';
-    let stdoutBuffer = '';
-    // yt-dlp prints lines like: [download]  45.2% of   10.00MiB at  1.20MiB/s ETA 00:04
-    const progressPattern = /\[download\]\s+(\d+(?:\.\d+)?)%/;
+  const multiplier =
+    multipliers[unit];
 
-    proc.stdout.on('data', (chunk) => {
-      stdoutBuffer += chunk.toString();
-      const lines = stdoutBuffer.split('\n');
-      stdoutBuffer = lines.pop();
+  if (!multiplier) {
+    return null;
+  }
 
-      if (onProgress) {
-        for (const line of lines) {
-          const match = line.match(progressPattern);
-          if (match) {
-            onProgress(parseFloat(match[1]));
+  return amount * multiplier;
+}
+
+function parseDownloadProgress(line) {
+  if (!line.includes("[download]")) {
+    return null;
+  }
+
+  const percentMatch =
+    line.match(
+      /\[download\]\s+(\d+(?:\.\d+)?)%/
+    );
+
+  if (!percentMatch) {
+    return null;
+  }
+
+  const percent =
+    Number(percentMatch[1]);
+
+  let downloadedBytes = null;
+  let totalBytes = null;
+
+  const totalMatch =
+    line.match(
+      /\bof\s+([\d.]+\s*(?:KiB|MiB|GiB|TiB|KB|MB|GB|TB|B))/i
+    );
+
+  if (totalMatch) {
+    totalBytes =
+      parseSizeToBytes(
+        totalMatch[1]
+      );
+  }
+
+  if (
+    totalBytes !== null &&
+    Number.isFinite(percent)
+  ) {
+    downloadedBytes =
+      totalBytes *
+      (percent / 100);
+  }
+
+  let speed = null;
+
+  const speedMatch =
+    line.match(
+      /\bat\s+([\d.]+\s*(?:KiB|MiB|GiB|TiB|KB|MB|GB|TB)\/s)/i
+    );
+
+  if (speedMatch) {
+    speed =
+      parseSizeToBytes(
+        speedMatch[1].replace(
+          /\/s$/i,
+          ""
+        )
+      );
+  }
+
+  return {
+    percent,
+    downloadedBytes,
+    totalBytes,
+    speed,
+  };
+}
+
+function runYtDlpDownload({
+  url,
+  formatSelector,
+  outputPath,
+  merge = false,
+  ffmpegPath,
+  onProgress,
+  onProgressDetails,
+}) {
+  return new Promise(
+    (resolve, reject) => {
+      const args = [
+        "--no-playlist",
+        "-f",
+        formatSelector,
+        "--newline",
+        "-o",
+        outputPath,
+        url,
+      ];
+
+      if (merge) {
+        args.push(
+          "--merge-output-format",
+          "mp4"
+        );
+      }
+
+      if (ffmpegPath) {
+        args.push(
+          "--ffmpeg-location",
+          ffmpegPath
+        );
+      }
+
+      const finalArgs =
+        addCommonArgs(args);
+
+      logYtDlpCommand(
+        finalArgs
+      );
+
+      const child = spawn(
+        YTDLP_PATH,
+        finalArgs,
+        {
+          windowsHide: true,
+        }
+      );
+
+      let stderr = "";
+      let stdoutBuffer = "";
+
+      const streams = new Map();
+
+      let currentStream =
+        "default";
+
+      let lastProgress = {
+        percent: 0,
+        downloadedBytes: null,
+        totalBytes: null,
+        speed: null,
+      };
+
+      child.stdout.on(
+        "data",
+        (data) => {
+          const text =
+            data.toString();
+
+          process.stdout.write(
+            text
+          );
+
+          stdoutBuffer += text;
+
+          const lines =
+            stdoutBuffer.split(
+              /\r?\n/
+            );
+
+          stdoutBuffer =
+            lines.pop() || "";
+
+          for (
+            const line of lines
+          ) {
+            const destinationMatch =
+              line.match(
+                /\[download\]\s+Destination:\s+(.+)/
+              );
+
+            if (
+              destinationMatch
+            ) {
+              currentStream =
+                destinationMatch[1].trim();
+
+              if (
+                !streams.has(
+                  currentStream
+                )
+              ) {
+                streams.set(
+                  currentStream,
+                  {
+                    downloadedBytes: 0,
+                    totalBytes: null,
+                    speed: null,
+                  }
+                );
+              }
+
+              continue;
+            }
+
+            const progress =
+              parseDownloadProgress(
+                line
+              );
+
+            if (!progress) {
+              continue;
+            }
+
+            const stream =
+              streams.get(
+                currentStream
+              ) || {
+                downloadedBytes: 0,
+                totalBytes: null,
+                speed: null,
+              };
+
+            if (
+              Number.isFinite(
+                progress.downloadedBytes
+              )
+            ) {
+              stream.downloadedBytes =
+                progress.downloadedBytes;
+            }
+
+            if (
+              Number.isFinite(
+                progress.totalBytes
+              ) &&
+              progress.totalBytes > 0
+            ) {
+              stream.totalBytes =
+                progress.totalBytes;
+            }
+
+            if (
+              Number.isFinite(
+                progress.speed
+              )
+            ) {
+              stream.speed =
+                progress.speed;
+            }
+
+            streams.set(
+              currentStream,
+              stream
+            );
+
+            let downloadedBytes = 0;
+            let totalBytes = 0;
+            let hasTotal = false;
+            let speed = null;
+
+            for (
+              const item of
+              streams.values()
+            ) {
+              if (
+                Number.isFinite(
+                  item.downloadedBytes
+                )
+              ) {
+                downloadedBytes +=
+                  item.downloadedBytes;
+              }
+
+              if (
+                Number.isFinite(
+                  item.totalBytes
+                ) &&
+                item.totalBytes > 0
+              ) {
+                totalBytes +=
+                  item.totalBytes;
+
+                hasTotal = true;
+              }
+
+              if (
+                Number.isFinite(
+                  item.speed
+                )
+              ) {
+                speed =
+                  (speed || 0) +
+                  item.speed;
+              }
+            }
+
+            const aggregatePercent =
+              hasTotal &&
+              totalBytes > 0
+                ? Math.min(
+                    100,
+                    (
+                      downloadedBytes /
+                      totalBytes
+                    ) * 100
+                  )
+                : progress.percent;
+
+            lastProgress = {
+              percent:
+                aggregatePercent,
+
+              downloadedBytes,
+
+              totalBytes:
+                hasTotal
+                  ? totalBytes
+                  : null,
+
+              speed,
+            };
+
+            if (
+              typeof onProgress ===
+              "function"
+            ) {
+              onProgress(
+                aggregatePercent
+              );
+            }
+
+            if (
+              typeof onProgressDetails ===
+              "function"
+            ) {
+              onProgressDetails(
+                lastProgress
+              );
+            }
           }
         }
+      );
+
+      child.stderr.on(
+        "data",
+        (data) => {
+          stderr +=
+            data.toString();
+        }
+      );
+
+      child.on(
+        "error",
+        reject
+      );
+
+      child.on(
+        "close",
+        (code, signal) => {
+          if (code === 0) {
+            if (
+              lastProgress.totalBytes &&
+              lastProgress.totalBytes > 0
+            ) {
+              lastProgress = {
+                ...lastProgress,
+                percent: 100,
+                downloadedBytes:
+                  lastProgress.totalBytes,
+              };
+            } else {
+              lastProgress = {
+                ...lastProgress,
+                percent: 100,
+              };
+            }
+
+            if (
+              typeof onProgress ===
+              "function"
+            ) {
+              onProgress(100);
+            }
+
+            if (
+              typeof onProgressDetails ===
+              "function"
+            ) {
+              onProgressDetails(
+                lastProgress
+              );
+            }
+
+            resolve();
+            return;
+          }
+
+          const error =
+            new Error(
+              stderr.trim() ||
+                `yt-dlp exited with code ${code}`
+            );
+
+          error.code = code;
+          error.signal = signal;
+
+          if (
+            signal === "SIGKILL"
+          ) {
+            error.code =
+              "PROCESS_KILLED";
+          }
+
+          reject(error);
+        }
+      );
+    }
+  );
+}
+
+async function downloadCombined({
+  url,
+  formatId,
+  height,
+  hasAudio,
+  outputPath,
+  ffmpegPath,
+  onProgress,
+  onProgressDetails,
+}) {
+  if (hasAudio) {
+    return runYtDlpDownload({
+      url,
+      formatSelector: formatId,
+      outputPath,
+      merge: false,
+      ffmpegPath,
+      onProgress,
+      onProgressDetails,
+    });
+  }
+
+  const selectedHeight =
+    Number(height);
+
+  const selectors = [];
+
+  if (
+    Number.isFinite(
+      selectedHeight
+    ) &&
+    selectedHeight > 0
+  ) {
+    selectors.push(
+      `${formatId}+bestaudio[ext=m4a]`,
+      `${formatId}+bestaudio`,
+      `best[height=${selectedHeight}][ext=mp4]`,
+      `best[height=${selectedHeight}]`,
+      `bestvideo[height=${selectedHeight}][ext=mp4]+bestaudio[ext=m4a]`,
+      `bestvideo[height=${selectedHeight}]+bestaudio`
+    );
+  } else {
+    selectors.push(
+      `${formatId}+bestaudio[ext=m4a]`,
+      `${formatId}+bestaudio`,
+      `${formatId}`
+    );
+  }
+
+  let lastError = null;
+
+  for (
+    const selector of selectors
+  ) {
+    try {
+      return await runYtDlpDownload({
+        url,
+        formatSelector: selector,
+        outputPath,
+        merge: true,
+        ffmpegPath,
+        onProgress,
+        onProgressDetails,
+      });
+    } catch (error) {
+      lastError = error;
+
+      const message =
+        String(
+          error?.message || ""
+        );
+
+      if (
+        !/403|forbidden/i.test(
+          message
+        )
+      ) {
+        throw error;
       }
-    });
 
-    proc.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    proc.on('error', (err) => {
-      reject(new Error(`Failed to start yt-dlp: ${err.message}`));
-    });
-
-    proc.on('close', (code, signal) => {
-      if (processRef) processRef.current = null;
-      if (signal === 'SIGKILL') {
-        // Process was deliberately killed (cancellation) — let the caller's
-        // own cancellation check handle this, not a generic failure.
-        reject(new Error('PROCESS_KILLED'));
-      } else if (code !== 0) {
-        reject(new Error(stderr || `yt-dlp exited with code ${code}`));
-      } else {
-        resolve(outputPath);
+      try {
+        fs.unlinkSync(
+          outputPath
+        );
+      } catch {
+        // Ignore missing output file.
       }
-    });
+    }
+  }
+
+  throw (
+    lastError ||
+    new Error(
+      "Unable to download the selected video format"
+    )
+  );
+}
+
+async function downloadSingleFormat({
+  url,
+  formatId,
+  outputPath,
+  ffmpegPath,
+  onProgress,
+  onProgressDetails,
+}) {
+  return runYtDlpDownload({
+    url,
+    formatSelector: formatId,
+    outputPath,
+    merge: false,
+    ffmpegPath,
+    onProgress,
+    onProgressDetails,
   });
 }
 
-/**
- * Downloads a video for the "no trim" path. If the format already has
- * audio, downloads it alone (fast). Otherwise asks yt-dlp to merge in the
- * best available audio track itself.
- */
-function downloadCombined({ url, formatId, hasAudio, outputPath, onProgress, processRef }) {
-  const formatSelector = hasAudio ? formatId : `${formatId}+bestaudio/best`;
-  return runYtDlpDownload({ url, formatSelector, outputPath, merge: !hasAudio, onProgress, processRef });
-}
-
-/**
- * Downloads exactly one raw stream (no merging) — used by the trim
- * pipeline for both combined-format and video-only downloads.
- */
-function downloadSingleFormat({ url, formatId, outputPath, onProgress, processRef }) {
-  return runYtDlpDownload({ url, formatSelector: formatId, outputPath, merge: false, onProgress, processRef });
-}
-
-/**
- * Downloads just the best available audio track alone — used by the trim
- * pipeline when the chosen video format has no audio of its own.
- */
-function downloadBestAudio({ url, outputPath, onProgress, processRef }) {
-  return runYtDlpDownload({ url, formatSelector: 'bestaudio', outputPath, merge: false, onProgress, processRef });
+async function downloadBestAudio({
+  url,
+  outputPath,
+  ffmpegPath,
+  onProgress,
+  onProgressDetails,
+}) {
+  return runYtDlpDownload({
+    url,
+    formatSelector:
+      "bestaudio[ext=m4a]/bestaudio",
+    outputPath,
+    merge: false,
+    ffmpegPath,
+    onProgress,
+    onProgressDetails,
+  });
 }
 
 module.exports = {
