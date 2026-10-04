@@ -1,6 +1,9 @@
 const { spawn } = require('child_process');
 
-const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg';
+const FFMPEG_PATH =
+  process.env.FFMPEG_PATH || 'ffmpeg';
+
+const MAX_STDERR_LENGTH = 64 * 1024;
 
 /**
  * Converts:
@@ -52,6 +55,25 @@ function toSeconds(time) {
   }
 
   return parts[0];
+}
+
+/**
+ * Prevents stderr from growing without a limit.
+ *
+ * FFmpeg can produce a large amount of diagnostic output.
+ * We only keep the most recent portion because the complete
+ * stderr log is not required for normal operation.
+ */
+function appendLimited(current, chunk) {
+  const next = current + chunk;
+
+  if (next.length <= MAX_STDERR_LENGTH) {
+    return next;
+  }
+
+  return next.slice(
+    next.length - MAX_STDERR_LENGTH
+  );
 }
 
 /**
@@ -111,7 +133,10 @@ function watchFfmpegProgress(
 
       const percent = Math.min(
         100,
-        (elapsedSec / totalDurationSec) * 100
+        Math.max(
+          0,
+          (elapsedSec / totalDurationSec) * 100
+        )
       );
 
       onProgress(percent);
@@ -241,7 +266,10 @@ function trimStream({
     let stderr = '';
 
     proc.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
+      stderr = appendLimited(
+        stderr,
+        chunk.toString()
+      );
     });
 
     proc.on('error', (err) => {
@@ -302,29 +330,41 @@ function trimStream({
  *
  * so neither stream is re-encoded.
  *
- * This is normally very fast compared with transcoding.
+ * Progress is reported through FFmpeg's machine-readable
+ * -progress output.
  */
 function mergeStreams({
   videoPath,
   audioPath,
   outputPath,
   processRef,
+  totalDurationSec,
+  onProgress,
 }) {
   return new Promise((resolve, reject) => {
     const args = [
       '-y',
-
       '-i',
       videoPath,
-
       '-i',
       audioPath,
-
       '-c',
       'copy',
-
-      outputPath,
     ];
+
+    /*
+     * Add machine-readable progress output when a duration
+     * and progress callback are available.
+     */
+    if (onProgress) {
+      args.push(
+        '-progress',
+        'pipe:1',
+        '-nostats'
+      );
+    }
+
+    args.push(outputPath);
 
     const proc = spawn(
       FFMPEG_PATH,
@@ -335,10 +375,26 @@ function mergeStreams({
       processRef.current = proc;
     }
 
+    /*
+     * Always consume stdout.
+     *
+     * This is especially important when -progress pipe:1
+     * is enabled because FFmpeg continuously writes progress
+     * information to stdout.
+     */
+    watchFfmpegProgress(
+      proc,
+      totalDurationSec,
+      onProgress
+    );
+
     let stderr = '';
 
     proc.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
+      stderr = appendLimited(
+        stderr,
+        chunk.toString()
+      );
     });
 
     proc.on('error', (err) => {
@@ -375,6 +431,10 @@ function mergeStreams({
         );
 
         return;
+      }
+
+      if (onProgress) {
+        onProgress(100);
       }
 
       resolve(outputPath);

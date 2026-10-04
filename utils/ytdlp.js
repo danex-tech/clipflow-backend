@@ -1,11 +1,17 @@
 const { spawn } = require("child_process");
 const fs = require("fs");
 
-const YTDLP_PATH = process.env.YTDLP_PATH || "yt-dlp";
+const YTDLP_PATH =
+  process.env.YTDLP_PATH || "yt-dlp";
 
-const COOKIES_BROWSER = process.env.COOKIES_BROWSER;
-const COOKIES_FILE = process.env.COOKIES_FILE;
-const PROXY_URL = process.env.PROXY_URL;
+const COOKIES_BROWSER =
+  process.env.COOKIES_BROWSER;
+
+const COOKIES_FILE =
+  process.env.COOKIES_FILE;
+
+const PROXY_URL =
+  process.env.PROXY_URL;
 
 // NOTE:
 // We intentionally do NOT pass POT_PROVIDER_URL to yt-dlp while using
@@ -14,6 +20,8 @@ const PROXY_URL = process.env.PROXY_URL;
 // path that returns HTTP 403.
 
 let ytDlpCommandLogged = false;
+
+const MAX_STDERR_LENGTH = 64 * 1024;
 
 function addCommonArgs(args) {
   const common = [
@@ -57,7 +65,10 @@ function logYtDlpCommand(finalArgs) {
 
   ytDlpCommandLogged = true;
 
-  console.log("[yt-dlp] Executable:", YTDLP_PATH);
+  console.log(
+    "[yt-dlp] Executable:",
+    YTDLP_PATH
+  );
 
   console.log(
     "[yt-dlp] Arguments:",
@@ -70,12 +81,37 @@ function logYtDlpCommand(finalArgs) {
           value.includes("&") ||
           value.includes("?")
         ) {
-          return `"${value.replace(/"/g, '\\"')}"`;
+          return `"${value.replace(
+            /"/g,
+            '\\"'
+          )}"`;
         }
 
         return value;
       })
       .join(" ")
+  );
+}
+
+/**
+ * Keeps stderr from growing without a limit.
+ *
+ * yt-dlp can produce a large amount of diagnostic output,
+ * especially when retries or extractor errors occur.
+ *
+ * We keep only the most recent portion because that is enough
+ * to diagnose the final failure while avoiding unnecessary
+ * memory consumption.
+ */
+function appendLimited(current, text) {
+  const next = current + text;
+
+  if (next.length <= MAX_STDERR_LENGTH) {
+    return next;
+  }
+
+  return next.slice(
+    next.length - MAX_STDERR_LENGTH
   );
 }
 
@@ -107,7 +143,10 @@ function runYtDlp(...args) {
     child.stderr.on("data", (data) => {
       const text = data.toString();
 
-      stderr += text;
+      stderr = appendLimited(
+        stderr,
+        text
+      );
 
       process.stderr.write(text);
     });
@@ -134,6 +173,10 @@ function runYtDlp(...args) {
 
       error.code = code;
       error.signal = signal;
+
+      if (signal === "SIGKILL") {
+        error.code = "PROCESS_KILLED";
+      }
 
       reject(error);
     });
@@ -167,20 +210,24 @@ function getStreamSize(format, duration) {
     if (Number.isFinite(format.tbr)) {
       bitrate = format.tbr;
     } else {
-      const videoBitrate = Number.isFinite(format.vbr)
-        ? format.vbr
-        : 0;
+      const videoBitrate =
+        Number.isFinite(format.vbr)
+          ? format.vbr
+          : 0;
 
-      const audioBitrate = Number.isFinite(format.abr)
-        ? format.abr
-        : 0;
+      const audioBitrate =
+        Number.isFinite(format.abr)
+          ? format.abr
+          : 0;
 
-      bitrate = videoBitrate + audioBitrate;
+      bitrate =
+        videoBitrate + audioBitrate;
     }
 
     if (bitrate > 0) {
       return {
-        size: (bitrate * 1000 * duration) / 8,
+        size:
+          (bitrate * 1000 * duration) / 8,
         estimated: true,
       };
     }
@@ -204,43 +251,50 @@ function findBestAudioFormat(formats) {
     return null;
   }
 
-  const m4aFormats = audioFormats.filter(
-    (format) => format.ext === "m4a"
-  );
+  const m4aFormats =
+    audioFormats.filter(
+      (format) =>
+        format.ext === "m4a"
+    );
 
-  const candidates = m4aFormats.length
-    ? m4aFormats
-    : audioFormats;
+  const candidates =
+    m4aFormats.length
+      ? m4aFormats
+      : audioFormats;
 
-  return [...candidates].sort((a, b) => {
-    const aAbr = Number.isFinite(a.abr)
-      ? a.abr
-      : Number.isFinite(a.tbr)
-      ? a.tbr
-      : 0;
+  return [...candidates].sort(
+    (a, b) => {
+      const aAbr =
+        Number.isFinite(a.abr)
+          ? a.abr
+          : Number.isFinite(a.tbr)
+          ? a.tbr
+          : 0;
 
-    const bAbr = Number.isFinite(b.abr)
-      ? b.abr
-      : Number.isFinite(b.tbr)
-      ? b.tbr
-      : 0;
+      const bAbr =
+        Number.isFinite(b.abr)
+          ? b.abr
+          : Number.isFinite(b.tbr)
+          ? b.tbr
+          : 0;
 
-    if (bAbr !== aAbr) {
-      return bAbr - aAbr;
+      if (bAbr !== aAbr) {
+        return bAbr - aAbr;
+      }
+
+      const aSize =
+        a.filesize ||
+        a.filesize_approx ||
+        0;
+
+      const bSize =
+        b.filesize ||
+        b.filesize_approx ||
+        0;
+
+      return bSize - aSize;
     }
-
-    const aSize =
-      a.filesize ||
-      a.filesize_approx ||
-      0;
-
-    const bSize =
-      b.filesize ||
-      b.filesize_approx ||
-      0;
-
-    return bSize - aSize;
-  })[0];
+  )[0];
 }
 
 function calculateDownloadSize(
@@ -248,13 +302,17 @@ function calculateDownloadSize(
   allFormats,
   duration
 ) {
-  const videoInfo = getStreamSize(
-    format,
-    duration
-  );
+  const videoInfo =
+    getStreamSize(
+      format,
+      duration
+    );
 
-  let totalSize = videoInfo.size;
-  let estimated = videoInfo.estimated;
+  let totalSize =
+    videoInfo.size;
+
+  let estimated =
+    videoInfo.estimated;
 
   const hasAudio =
     format.acodec &&
@@ -268,7 +326,9 @@ function calculateDownloadSize(
   }
 
   const bestAudio =
-    findBestAudioFormat(allFormats);
+    findBestAudioFormat(
+      allFormats
+    );
 
   if (
     !bestAudio ||
@@ -280,10 +340,11 @@ function calculateDownloadSize(
     };
   }
 
-  const audioInfo = getStreamSize(
-    bestAudio,
-    duration
-  );
+  const audioInfo =
+    getStreamSize(
+      bestAudio,
+      duration
+    );
 
   if (audioInfo.size === null) {
     return {
@@ -292,7 +353,9 @@ function calculateDownloadSize(
     };
   }
 
-  totalSize += audioInfo.size;
+  totalSize +=
+    audioInfo.size;
+
   estimated =
     estimated ||
     audioInfo.estimated;
@@ -304,13 +367,15 @@ function calculateDownloadSize(
 }
 
 async function getVideoInfo(url) {
-  const { stdout } = await runYtDlp(
-    "--dump-json",
-    "--no-playlist",
-    url
-  );
+  const { stdout } =
+    await runYtDlp(
+      "--dump-json",
+      "--no-playlist",
+      url
+    );
 
-  const data = JSON.parse(stdout);
+  const data =
+    JSON.parse(stdout);
 
   const duration =
     Number(data.duration) || 0;
@@ -328,73 +393,78 @@ async function getVideoInfo(url) {
     );
 
   const mappedFormats =
-    videoFormats.map((format) => {
-      const hasAudio =
-        format.acodec &&
-        format.acodec !== "none";
+    videoFormats.map(
+      (format) => {
+        const hasAudio =
+          format.acodec &&
+          format.acodec !== "none";
 
-      const sizeInfo =
-        calculateDownloadSize(
-          format,
-          rawFormats,
-          duration
-        );
+        const sizeInfo =
+          calculateDownloadSize(
+            format,
+            rawFormats,
+            duration
+          );
 
-      return {
-        format_id:
-          format.format_id,
+        return {
+          format_id:
+            format.format_id,
 
-        quality:
-          format.format_note ||
-          (
-            format.height
-              ? `${format.height}p`
-              : "unknown"
-          ),
+          quality:
+            format.format_note ||
+            (
+              format.height
+                ? `${format.height}p`
+                : "unknown"
+            ),
 
-        ext:
-          format.ext,
+          ext:
+            format.ext,
 
-        height:
-          format.height ||
-          null,
+          height:
+            format.height ||
+            null,
 
-        filesize:
-          sizeInfo.size,
+          filesize:
+            sizeInfo.size,
 
-        filesizeIsEstimate:
-          sizeInfo.estimated,
+          filesizeIsEstimate:
+            sizeInfo.estimated,
 
-        hasAudio,
+          hasAudio,
 
-        audioCodec:
-          format.acodec ||
-          null,
+          audioCodec:
+            format.acodec ||
+            null,
 
-        videoCodec:
-          format.vcodec ||
-          null,
+          videoCodec:
+            format.vcodec ||
+            null,
 
-        videoBitrate:
-          Number.isFinite(format.vbr)
-            ? format.vbr
-            : null,
+          videoBitrate:
+            Number.isFinite(format.vbr)
+              ? format.vbr
+              : null,
 
-        audioBitrate:
-          Number.isFinite(format.abr)
-            ? format.abr
-            : null,
+          audioBitrate:
+            Number.isFinite(format.abr)
+              ? format.abr
+              : null,
 
-        totalBitrate:
-          Number.isFinite(format.tbr)
-            ? format.tbr
-            : null,
-      };
-    });
+          totalBitrate:
+            Number.isFinite(format.tbr)
+              ? format.tbr
+              : null,
+        };
+      }
+    );
 
-  const grouped = new Map();
+  const grouped =
+    new Map();
 
-  for (const format of mappedFormats) {
+  for (
+    const format of mappedFormats
+  ) {
     const key =
       format.height ||
       format.quality;
@@ -410,31 +480,32 @@ async function getVideoInfo(url) {
 
   const formats =
     [...grouped.values()]
-      .map((group) =>
-        [...group].sort(
-          (a, b) => {
-            const audioScore =
-              Number(b.hasAudio) -
-              Number(a.hasAudio);
+      .map(
+        (group) =>
+          [...group].sort(
+            (a, b) => {
+              const audioScore =
+                Number(b.hasAudio) -
+                Number(a.hasAudio);
 
-            if (audioScore !== 0) {
-              return audioScore;
+              if (audioScore !== 0) {
+                return audioScore;
+              }
+
+              const mp4Score =
+                Number(b.ext === "mp4") -
+                Number(a.ext === "mp4");
+
+              if (mp4Score !== 0) {
+                return mp4Score;
+              }
+
+              return (
+                (b.videoBitrate || 0) -
+                (a.videoBitrate || 0)
+              );
             }
-
-            const mp4Score =
-              Number(b.ext === "mp4") -
-              Number(a.ext === "mp4");
-
-            if (mp4Score !== 0) {
-              return mp4Score;
-            }
-
-            return (
-              (b.videoBitrate || 0) -
-              (a.videoBitrate || 0)
-            );
-          }
-        )[0]
+          )[0]
       )
       .sort(
         (a, b) =>
@@ -474,17 +545,20 @@ function parseSizeToBytes(value) {
     return null;
   }
 
-  const match = String(value)
-    .trim()
-    .match(
-      /^([\d.]+)\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB|B)$/i
-    );
+  const match =
+    String(value)
+      .trim()
+      .match(
+        /^([\d.]+)\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB|B)$/i
+      );
 
   if (!match) {
     return null;
   }
 
-  const amount = Number(match[1]);
+  const amount =
+    Number(match[1]);
+
   const unit =
     match[2].toLowerCase();
 
@@ -582,6 +656,7 @@ function runYtDlpDownload({
   outputPath,
   merge = false,
   ffmpegPath,
+  processRef,
   onProgress,
   onProgressDetails,
 }) {
@@ -618,18 +693,38 @@ function runYtDlpDownload({
         finalArgs
       );
 
-      const child = spawn(
-        YTDLP_PATH,
-        finalArgs,
-        {
-          windowsHide: true,
-        }
-      );
+      const child =
+        spawn(
+          YTDLP_PATH,
+          finalArgs,
+          {
+            windowsHide: true,
+          }
+        );
+
+      /*
+       * Make this yt-dlp process available to the worker's
+       * cancellation system.
+       */
+      if (processRef) {
+        processRef.current = child;
+      }
 
       let stderr = "";
       let stdoutBuffer = "";
 
-      const streams = new Map();
+      /*
+       * Each downloaded stream gets its own progress state.
+       *
+       * This is important when yt-dlp downloads:
+       *
+       *   video
+       *   audio
+       *
+       * separately.
+       */
+      const streams =
+        new Map();
 
       let currentStream =
         "default";
@@ -664,6 +759,10 @@ function runYtDlpDownload({
           for (
             const line of lines
           ) {
+            /*
+             * Detect which output stream yt-dlp
+             * is currently downloading.
+             */
             const destinationMatch =
               line.match(
                 /\[download\]\s+Destination:\s+(.+)/
@@ -744,6 +843,13 @@ function runYtDlpDownload({
               stream
             );
 
+            /*
+             * Aggregate all active streams.
+             *
+             * This prevents progress from jumping
+             * back to 0 when yt-dlp switches from
+             * video to audio.
+             */
             let downloadedBytes = 0;
             let totalBytes = 0;
             let hasTotal = false;
@@ -797,9 +903,18 @@ function runYtDlpDownload({
                   )
                 : progress.percent;
 
+            /*
+             * Never move progress backwards.
+             */
+            const safePercent =
+              Math.max(
+                lastProgress.percent || 0,
+                aggregatePercent
+              );
+
             lastProgress = {
               percent:
-                aggregatePercent,
+                safePercent,
 
               downloadedBytes,
 
@@ -816,7 +931,7 @@ function runYtDlpDownload({
               "function"
             ) {
               onProgress(
-                aggregatePercent
+                safePercent
               );
             }
 
@@ -835,36 +950,58 @@ function runYtDlpDownload({
       child.stderr.on(
         "data",
         (data) => {
-          stderr +=
+          const text =
             data.toString();
+
+          stderr =
+            appendLimited(
+              stderr,
+              text
+            );
+
+          process.stderr.write(
+            text
+          );
         }
       );
 
       child.on(
         "error",
-        reject
+        (error) => {
+          if (processRef) {
+            processRef.current = null;
+          }
+
+          reject(error);
+        }
       );
 
       child.on(
         "close",
         (code, signal) => {
+          if (processRef) {
+            processRef.current = null;
+          }
+
           if (code === 0) {
-            if (
-              lastProgress.totalBytes &&
-              lastProgress.totalBytes > 0
-            ) {
-              lastProgress = {
-                ...lastProgress,
-                percent: 100,
-                downloadedBytes:
-                  lastProgress.totalBytes,
-              };
-            } else {
-              lastProgress = {
-                ...lastProgress,
-                percent: 100,
-              };
-            }
+            /*
+             * Always finish the internal yt-dlp operation
+             * at 100%.
+             *
+             * worker.js maps this to its own stage range,
+             * so this does NOT mean the overall job becomes
+             * 100% prematurely.
+             */
+            lastProgress = {
+              ...lastProgress,
+              percent: 100,
+
+              downloadedBytes:
+                lastProgress.totalBytes &&
+                lastProgress.totalBytes > 0
+                  ? lastProgress.totalBytes
+                  : lastProgress.downloadedBytes,
+            };
 
             if (
               typeof onProgress ===
@@ -883,6 +1020,7 @@ function runYtDlpDownload({
             }
 
             resolve();
+
             return;
           }
 
@@ -892,8 +1030,11 @@ function runYtDlpDownload({
                 `yt-dlp exited with code ${code}`
             );
 
-          error.code = code;
-          error.signal = signal;
+          error.code =
+            code;
+
+          error.signal =
+            signal;
 
           if (
             signal === "SIGKILL"
@@ -916,6 +1057,7 @@ async function downloadCombined({
   hasAudio,
   outputPath,
   ffmpegPath,
+  processRef,
   onProgress,
   onProgressDetails,
 }) {
@@ -926,6 +1068,7 @@ async function downloadCombined({
       outputPath,
       merge: false,
       ffmpegPath,
+      processRef,
       onProgress,
       onProgressDetails,
     });
@@ -970,6 +1113,7 @@ async function downloadCombined({
         outputPath,
         merge: true,
         ffmpegPath,
+        processRef,
         onProgress,
         onProgressDetails,
       });
@@ -981,6 +1125,10 @@ async function downloadCombined({
           error?.message || ""
         );
 
+      /*
+       * Only retry another format selector when the
+       * current selector is rejected by the source.
+       */
       if (
         !/403|forbidden/i.test(
           message
@@ -1012,6 +1160,7 @@ async function downloadSingleFormat({
   formatId,
   outputPath,
   ffmpegPath,
+  processRef,
   onProgress,
   onProgressDetails,
 }) {
@@ -1021,6 +1170,7 @@ async function downloadSingleFormat({
     outputPath,
     merge: false,
     ffmpegPath,
+    processRef,
     onProgress,
     onProgressDetails,
   });
@@ -1030,6 +1180,7 @@ async function downloadBestAudio({
   url,
   outputPath,
   ffmpegPath,
+  processRef,
   onProgress,
   onProgressDetails,
 }) {
@@ -1040,6 +1191,7 @@ async function downloadBestAudio({
     outputPath,
     merge: false,
     ffmpegPath,
+    processRef,
     onProgress,
     onProgressDetails,
   });

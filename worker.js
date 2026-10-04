@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 
 const { Worker, UnrecoverableError } = require('bullmq');
@@ -15,18 +14,26 @@ const {
 const {
   trimStream,
   mergeStreams,
+  toSeconds,
 } = require('./utils/ffmpeg');
 
-const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
+const DOWNLOADS_DIR = path.join(
+  __dirname,
+  'downloads'
+);
 
 if (!fs.existsSync(DOWNLOADS_DIR)) {
-  fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+  fs.mkdirSync(DOWNLOADS_DIR, {
+    recursive: true,
+  });
 }
 
 const MAX_ATTEMPTS = 5;
 
 function needsAudioSafety(url) {
-  return /youtube\.com|youtu\.be|tiktok\.com/i.test(url);
+  return /youtube\.com|youtu\.be|tiktok\.com/i.test(
+    url
+  );
 }
 
 function makeStageReporter(
@@ -99,9 +106,7 @@ function makeStageReporter(
 
     if (
       details &&
-      Number.isFinite(
-        details.speed
-      ) &&
+      Number.isFinite(details.speed) &&
       details.speed >= 0
     ) {
       progress.speed =
@@ -134,7 +139,11 @@ function makeStageReporter(
 
 function safeUnlink(filePath) {
   if (!filePath) return;
-  fs.unlink(filePath, () => {});
+
+  fs.unlink(
+    filePath,
+    () => {}
+  );
 }
 
 const worker = new Worker(
@@ -167,10 +176,11 @@ const worker = new Worker(
     const runId =
       `${fileId}-a${attempt}`;
 
-    const rawPath = path.join(
-      DOWNLOADS_DIR,
-      `${fileId}-raw.mp4`
-    );
+    const rawPath =
+      path.join(
+        DOWNLOADS_DIR,
+        `${fileId}-raw.mp4`
+      );
 
     const videoOnlyPath =
       path.join(
@@ -196,10 +206,11 @@ const worker = new Worker(
         `${runId}-audio-trimmed.m4a`
       );
 
-    const finalPath = path.join(
-      DOWNLOADS_DIR,
-      `${fileId}-final.mp4`
-    );
+    const finalPath =
+      path.join(
+        DOWNLOADS_DIR,
+        `${fileId}-final.mp4`
+      );
 
     await connection
       .del(`cancel:${job.id}`)
@@ -207,6 +218,13 @@ const worker = new Worker(
 
     let cancelled = false;
 
+    /*
+     * Holds the currently running yt-dlp
+     * or FFmpeg child process.
+     *
+     * This allows the cancellation watcher
+     * to terminate the active process.
+     */
     const currentProcess = {
       current: null,
     };
@@ -249,13 +267,20 @@ const worker = new Worker(
     const attemptTempFiles = [];
 
     try {
+      /*
+       * ============================================================
+       * RETRY / RECONNECTING
+       * ============================================================
+       */
       if (attempt > 1) {
         await job.updateProgress({
-          stage: 'reconnecting',
+          stage: 'Reconnecting',
           percent: 0,
           attempt,
-          maxAttempts: MAX_ATTEMPTS,
+          maxAttempts:
+            MAX_ATTEMPTS,
           weakConnection: true,
+
           ...(Number.isFinite(
             expectedSize
           ) &&
@@ -269,28 +294,68 @@ const worker = new Worker(
         });
       }
 
+      /*
+       * ============================================================
+       * PREPARING
+       * ============================================================
+       */
+      await job.updateProgress({
+        stage: 'Preparing video',
+        percent: 5,
+        attempt,
+        maxAttempts:
+          MAX_ATTEMPTS,
+
+        ...(Number.isFinite(
+          expectedSize
+        ) &&
+        expectedSize > 0
+          ? {
+              expectedSize,
+              totalBytes:
+                expectedSize,
+              downloadedBytes: 0,
+            }
+          : {}),
+      });
+
+      /*
+       * ============================================================
+       * NON-TRIMMED VIDEO
+       * ============================================================
+       *
+       * Preparing:       0–5%
+       * Fetching:        5–70%
+       * Processing:      70–95%
+       * Finalizing:      95–99%
+       * Complete:        100%
+       */
       if (!wantsTrim) {
         attemptTempFiles.push(
           finalPath
         );
 
-        const reportDownload =
-          makeStageReporter(job, {
-            rangeStart: 10,
-            rangeEnd: 99,
-            stage: 'downloading',
-            attempt,
-            maxAttempts:
-              MAX_ATTEMPTS,
-            expectedSize,
-          });
+        const reportFetching =
+          makeStageReporter(
+            job,
+            {
+              rangeStart: 5,
+              rangeEnd: 70,
+              stage: 'Fetching video',
+              attempt,
+              maxAttempts:
+                MAX_ATTEMPTS,
+              expectedSize,
+            }
+          );
 
         await job.updateProgress({
-          stage: 'downloading',
-          percent: 10,
+          stage: 'Fetching video',
+          percent: 5,
           attempt,
           maxAttempts:
             MAX_ATTEMPTS,
+
           ...(Number.isFinite(
             expectedSize
           ) &&
@@ -311,39 +376,46 @@ const worker = new Worker(
           hasAudio,
           outputPath: rawPath,
 
-          onProgress: (percent) => {
-            reportDownload(
-              percent
-            );
-          },
+          processRef:
+            currentProcess,
 
-          onProgressDetails: (
-            details
-          ) => {
-            reportDownload(
-              Number.isFinite(
-                details?.percent
-              )
-                ? details.percent
-                : 0,
-              details
-            );
-          },
+          onProgress:
+            (percent) => {
+              reportFetching(
+                percent
+              );
+            },
+
+          onProgressDetails:
+            (details) => {
+              reportFetching(
+                Number.isFinite(
+                  details?.percent
+                )
+                  ? details.percent
+                  : 0,
+                details
+              );
+            },
         });
 
         throwIfCancelled();
 
-        fs.renameSync(
-          rawPath,
-          finalPath
-        );
-
+        /*
+         * downloadCombined() may perform
+         * internal format merging.
+         *
+         * We therefore expose the remaining
+         * work as Processing rather than
+         * leaving the UI stuck on Fetching.
+         */
         await job.updateProgress({
-          stage: 'downloading',
-          percent: 99,
+          stage: 'Processing video',
+          percent: 70,
           attempt,
           maxAttempts:
             MAX_ATTEMPTS,
+
           ...(Number.isFinite(
             expectedSize
           ) &&
@@ -353,28 +425,89 @@ const worker = new Worker(
               }
             : {}),
         });
-      } else if (hasAudio) {
+
+        throwIfCancelled();
+
+        /*
+         * Finalizing
+         */
+        await job.updateProgress({
+          stage: 'Finalizing video',
+          percent: 95,
+          attempt,
+          maxAttempts:
+            MAX_ATTEMPTS,
+
+          ...(Number.isFinite(
+            expectedSize
+          ) &&
+          expectedSize > 0
+            ? {
+                expectedSize,
+              }
+            : {}),
+        });
+
+        fs.renameSync(
+          rawPath,
+          finalPath
+        );
+
+        throwIfCancelled();
+
+        /*
+         * Explicit 99% state.
+         *
+         * 100% is reserved for the
+         * completed job below.
+         */
+        await job.updateProgress({
+          stage: 'Finalizing video',
+          percent: 99,
+          attempt,
+          maxAttempts:
+            MAX_ATTEMPTS,
+        });
+      }
+
+      /*
+       * ============================================================
+       * TRIMMED VIDEO WITH AUDIO INCLUDED IN SOURCE
+       * ============================================================
+       *
+       * Preparing:       0–5%
+       * Fetching:        5–65%
+       * Trimming:        65–80%
+       * Processing:      80–95%
+       * Finalizing:      95–99%
+       * Complete:        100%
+       */
+      else if (hasAudio) {
         attemptTempFiles.push(
           finalPath
         );
 
-        const reportDownload =
-          makeStageReporter(job, {
-            rangeStart: 10,
-            rangeEnd: 60,
-            stage: 'downloading',
-            attempt,
-            maxAttempts:
-              MAX_ATTEMPTS,
-            expectedSize,
-          });
+        const reportFetching =
+          makeStageReporter(
+            job,
+            {
+              rangeStart: 5,
+              rangeEnd: 65,
+              stage: 'Fetching video',
+              attempt,
+              maxAttempts:
+                MAX_ATTEMPTS,
+              expectedSize,
+            }
+          );
 
         await job.updateProgress({
-          stage: 'downloading',
-          percent: 10,
+          stage: 'Fetching video',
+          percent: 5,
           attempt,
           maxAttempts:
             MAX_ATTEMPTS,
+
           ...(Number.isFinite(
             expectedSize
           ) &&
@@ -393,37 +526,46 @@ const worker = new Worker(
           formatId,
           outputPath: rawPath,
 
-          onProgress: (percent) => {
-            reportDownload(
-              percent
-            );
-          },
+          processRef:
+            currentProcess,
 
-          onProgressDetails: (
-            details
-          ) => {
-            reportDownload(
-              Number.isFinite(
-                details?.percent
-              )
-                ? details.percent
-                : 0,
-              details
-            );
-          },
+          onProgress:
+            (percent) => {
+              reportFetching(
+                percent
+              );
+            },
+
+          onProgressDetails:
+            (details) => {
+              reportFetching(
+                Number.isFinite(
+                  details?.percent
+                )
+                  ? details.percent
+                  : 0,
+                details
+              );
+            },
         });
 
         throwIfCancelled();
 
+        /*
+         * Trimming
+         */
         const reportTrim =
-          makeStageReporter(job, {
-            rangeStart: 60,
-            rangeEnd: 99,
-            stage: 'trimming',
-            attempt,
-            maxAttempts:
-              MAX_ATTEMPTS,
-          });
+          makeStageReporter(
+            job,
+            {
+              rangeStart: 65,
+              rangeEnd: 80,
+              stage: 'Trimming video',
+              attempt,
+              maxAttempts:
+                MAX_ATTEMPTS,
+            }
+          );
 
         await trimStream({
           inputPath: rawPath,
@@ -432,37 +574,98 @@ const worker = new Worker(
           endTime,
           videoCodec: 'copy',
           audioCodec,
+
+          processRef:
+            currentProcess,
+
           onProgress:
             reportTrim,
         });
 
         throwIfCancelled();
 
-        safeUnlink(rawPath);
-      } else {
+        safeUnlink(
+          rawPath
+        );
+
+        /*
+         * Processing
+         */
+        await job.updateProgress({
+          stage: 'Processing video',
+          percent: 80,
+          attempt,
+          maxAttempts:
+            MAX_ATTEMPTS,
+        });
+
+        throwIfCancelled();
+
+        /*
+         * Finalizing
+         */
+        await job.updateProgress({
+          stage: 'Finalizing video',
+          percent: 95,
+          attempt,
+          maxAttempts:
+            MAX_ATTEMPTS,
+        });
+
+        await job.updateProgress({
+          stage: 'Finalizing video',
+          percent: 99,
+          attempt,
+          maxAttempts:
+            MAX_ATTEMPTS,
+        });
+      }
+
+      /*
+       * ============================================================
+       * TRIMMED VIDEO WITH SEPARATE VIDEO + AUDIO
+       * ============================================================
+       *
+       * Preparing:       0–5%
+       * Fetching video:  5–40%
+       * Fetching audio:  40–65%
+       * Trimming video:  65–72.5%
+       * Trimming audio:  72.5–80%
+       * Merging video:   80–95%
+       * Finalizing:      95–99%
+       * Complete:        100%
+       */
+      else {
         attemptTempFiles.push(
           trimmedVideoPath,
           trimmedAudioPath,
           finalPath
         );
 
-        const reportVideoDl =
-          makeStageReporter(job, {
-            rangeStart: 10,
-            rangeEnd: 35,
-            stage: 'downloading video',
-            attempt,
-            maxAttempts:
-              MAX_ATTEMPTS,
-            expectedSize,
-          });
+        /*
+         * Fetching video
+         */
+        const reportVideoFetching =
+          makeStageReporter(
+            job,
+            {
+              rangeStart: 5,
+              rangeEnd: 40,
+              stage: 'Fetching video',
+              attempt,
+              maxAttempts:
+                MAX_ATTEMPTS,
+              expectedSize,
+            }
+          );
 
         await job.updateProgress({
-          stage: 'downloading video',
-          percent: 10,
+          stage: 'Fetching video',
+          percent: 5,
           attempt,
           maxAttempts:
             MAX_ATTEMPTS,
+
           ...(Number.isFinite(
             expectedSize
           ) &&
@@ -482,94 +685,93 @@ const worker = new Worker(
           outputPath:
             videoOnlyPath,
 
-          onProgress: (percent) => {
-            reportVideoDl(
-              percent
-            );
-          },
+          processRef:
+            currentProcess,
 
-          onProgressDetails: (
-            details
-          ) => {
-            reportVideoDl(
-              Number.isFinite(
-                details?.percent
-              )
-                ? details.percent
-                : 0,
-              details
-            );
-          },
+          onProgress:
+            (percent) => {
+              reportVideoFetching(
+                percent
+              );
+            },
+
+          onProgressDetails:
+            (details) => {
+              reportVideoFetching(
+                Number.isFinite(
+                  details?.percent
+                )
+                  ? details.percent
+                  : 0,
+                details
+              );
+            },
         });
 
         throwIfCancelled();
 
-        const reportAudioDl =
-          makeStageReporter(job, {
-            rangeStart: 35,
-            rangeEnd: 50,
-            stage: 'downloading audio',
-            attempt,
-            maxAttempts:
-              MAX_ATTEMPTS,
-            expectedSize,
-          });
-
-        await job.updateProgress({
-          stage: 'downloading audio',
-          percent: 35,
-          attempt,
-          maxAttempts:
-            MAX_ATTEMPTS,
-          ...(Number.isFinite(
-            expectedSize
-          ) &&
-          expectedSize > 0
-            ? {
-                expectedSize,
-                totalBytes:
-                  expectedSize,
-                downloadedBytes: 0,
-              }
-            : {}),
-        });
+        /*
+         * Fetching audio
+         */
+        const reportAudioFetching =
+          makeStageReporter(
+            job,
+            {
+              rangeStart: 40,
+              rangeEnd: 65,
+              stage: 'Fetching audio',
+              attempt,
+              maxAttempts:
+                MAX_ATTEMPTS,
+              expectedSize,
+            }
+          );
 
         await downloadBestAudio({
           url,
           outputPath:
             audioOnlyPath,
 
-          onProgress: (percent) => {
-            reportAudioDl(
-              percent
-            );
-          },
+          processRef:
+            currentProcess,
 
-          onProgressDetails: (
-            details
-          ) => {
-            reportAudioDl(
-              Number.isFinite(
-                details?.percent
-              )
-                ? details.percent
-                : 0,
-              details
-            );
-          },
+          onProgress:
+            (percent) => {
+              reportAudioFetching(
+                percent
+              );
+            },
+
+          onProgressDetails:
+            (details) => {
+              reportAudioFetching(
+                Number.isFinite(
+                  details?.percent
+                )
+                  ? details.percent
+                  : 0,
+                details
+              );
+            },
         });
 
         throwIfCancelled();
 
+        /*
+         * Trimming video
+         */
         const reportVideoTrim =
-          makeStageReporter(job, {
-            rangeStart: 50,
-            rangeEnd: 65,
-            stage: 'trimming video',
-            attempt,
-            maxAttempts:
-              MAX_ATTEMPTS,
-          });
+          makeStageReporter(
+            job,
+            {
+              rangeStart: 65,
+              rangeEnd: 72.5,
+              stage: 'Trimming video',
+              attempt,
+              maxAttempts:
+                MAX_ATTEMPTS,
+            }
+          );
 
         await trimStream({
           inputPath:
@@ -580,6 +782,10 @@ const worker = new Worker(
           endTime,
           videoCodec: 'copy',
           audioCodec: 'copy',
+
+          processRef:
+            currentProcess,
+
           onProgress:
             reportVideoTrim,
         });
@@ -590,15 +796,21 @@ const worker = new Worker(
           videoOnlyPath
         );
 
+        /*
+         * Trimming audio
+         */
         const reportAudioTrim =
-          makeStageReporter(job, {
-            rangeStart: 65,
-            rangeEnd: 80,
-            stage: 'trimming audio',
-            attempt,
-            maxAttempts:
-              MAX_ATTEMPTS,
-          });
+          makeStageReporter(
+            job,
+            {
+              rangeStart: 72.5,
+              rangeEnd: 80,
+              stage: 'Trimming audio',
+              attempt,
+              maxAttempts:
+                MAX_ATTEMPTS,
+            }
+          );
 
         await trimStream({
           inputPath:
@@ -609,6 +821,10 @@ const worker = new Worker(
           endTime,
           videoCodec: 'copy',
           audioCodec,
+
+          processRef:
+            currentProcess,
+
           onProgress:
             reportAudioTrim,
         });
@@ -619,9 +835,60 @@ const worker = new Worker(
           audioOnlyPath
         );
 
+        /*
+         * ========================================================
+         * MERGING
+         * ========================================================
+         *
+         * The FFmpeg merge progress is mapped:
+         *
+         * FFmpeg: 0–100%
+         * Worker:  80–95%
+         *
+         * This prevents the UI from appearing stuck at 80%.
+         */
+        const startSec =
+          toSeconds(startTime) || 0;
+
+        const endSec =
+          toSeconds(endTime);
+
+        let mergeDurationSec =
+          null;
+
+        if (
+          Number.isFinite(endSec) &&
+          endSec > startSec
+        ) {
+          mergeDurationSec =
+            endSec - startSec;
+        } else if (
+          Number.isFinite(
+            Number(duration)
+          ) &&
+          Number(duration) > startSec
+        ) {
+          mergeDurationSec =
+            Number(duration) -
+            startSec;
+        }
+
+        const reportMerge =
+          makeStageReporter(
+            job,
+            {
+              rangeStart: 80,
+              rangeEnd: 95,
+              stage: 'Merging video',
+              attempt,
+              maxAttempts:
+                MAX_ATTEMPTS,
+            }
+          );
+
         await job.updateProgress({
-          stage: 'merging',
-          percent: 90,
+          stage: 'Merging video',
+          percent: 80,
           attempt,
           maxAttempts:
             MAX_ATTEMPTS,
@@ -634,6 +901,15 @@ const worker = new Worker(
             trimmedAudioPath,
           outputPath:
             finalPath,
+
+          processRef:
+            currentProcess,
+
+          totalDurationSec:
+            mergeDurationSec,
+
+          onProgress:
+            reportMerge,
         });
 
         throwIfCancelled();
@@ -645,19 +921,59 @@ const worker = new Worker(
         safeUnlink(
           trimmedAudioPath
         );
+
+        /*
+         * Finalizing
+         */
+        await job.updateProgress({
+          stage: 'Finalizing video',
+          percent: 95,
+          attempt,
+          maxAttempts:
+            MAX_ATTEMPTS,
+        });
+
+        await job.updateProgress({
+          stage: 'Finalizing video',
+          percent: 99,
+          attempt,
+          maxAttempts:
+            MAX_ATTEMPTS,
+        });
       }
 
-      // Diagnostic check: confirm that the final file
-      // actually exists immediately after processing.
+      /*
+       * ============================================================
+       * DIAGNOSTIC CHECK
+       * ============================================================
+       */
       console.log(
-        `[Worker] Final file check | path=${finalPath} | exists=${fs.existsSync(finalPath)}`
+        `[Worker] Final file check | path=${finalPath} | exists=${fs.existsSync(
+          finalPath
+        )}`
       );
 
+      if (!fs.existsSync(finalPath)) {
+        throw new Error(
+          'Final video file was not created'
+        );
+      }
+
+      /*
+       * ============================================================
+       * COMPLETE
+       * ============================================================
+       *
+       * 100% is emitted only after the final
+       * file has actually been confirmed.
+       */
       await job.updateProgress({
-        stage: 'done',
+        stage: 'Complete',
         percent: 100,
         attempt,
-        maxAttempts: MAX_ATTEMPTS,
+        maxAttempts:
+          MAX_ATTEMPTS,
+
         ...(Number.isFinite(
           expectedSize
         ) &&
@@ -685,12 +1001,28 @@ const worker = new Worker(
         err instanceof
           UnrecoverableError
       ) {
-        safeUnlink(rawPath);
+        safeUnlink(
+          rawPath
+        );
+
         safeUnlink(
           videoOnlyPath
         );
+
         safeUnlink(
           audioOnlyPath
+        );
+
+        safeUnlink(
+          trimmedVideoPath
+        );
+
+        safeUnlink(
+          trimmedAudioPath
+        );
+
+        safeUnlink(
+          finalPath
         );
 
         throw new UnrecoverableError(
@@ -712,6 +1044,13 @@ const worker = new Worker(
       clearInterval(
         cancelCheckInterval
       );
+
+      if (
+        currentProcess.current
+      ) {
+        currentProcess.current =
+          null;
+      }
     }
   },
   {
